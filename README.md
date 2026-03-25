@@ -1,4 +1,4 @@
-# GDT Bridge Agent — MVZ El-Sharafi
+# GDT Bridge Agent 
 
 Polls your web forms API for pending GDT files and drops them into the
 Medical Office (indmed) import folder every 10 seconds.

@@ -1,5 +1,5 @@
 /**
- * GDT Bridge Agent — MVZ El-Sharafi
+ * GDT Bridge Agent
  *
  * Polls the web forms API for pending GDT files and drops them
  * into the Medical Office GDT import folder.
@@ -102,6 +102,29 @@ function writeGdtFile(filename, content) {
   return dest;
 }
 
+/**
+ * Write a PDF file to the Medical Office import folder.
+ * PDFs are binary files decoded from base64.
+ */
+function writePdfFile(filename, content) {
+  const dest = path.join(CONFIG.importFolder, filename);
+
+  // Decode base64 content to binary buffer
+  let buffer;
+  if (isBase64(content)) {
+    buffer = Buffer.from(content, 'base64');
+  } else {
+    throw new Error('PDF content must be base64 encoded');
+  }
+
+  // Atomic write: write to .tmp then rename
+  const tmp = dest + '.tmp';
+  fs.writeFileSync(tmp, buffer);
+  fs.renameSync(tmp, dest);
+
+  return dest;
+}
+
 function isBase64(str) {
   if (typeof str !== 'string') return false;
   return /^[A-Za-z0-9+/=\r\n]+$/.test(str) && str.length % 4 === 0;
@@ -151,14 +174,47 @@ async function poll() {
     for (const item of pending) {
       try {
         const filename = item.filename || `gdt_${item.id}_${Date.now()}.gdt`;
-        const dest = writeGdtFile(filename, item.content);
-        logger.ok(`Written: ${filename} → ${dest}`);
+        const pdfFilename = item.pdfFilename;
+        const pdfContent = item.pdfContent;
 
+        let gdtDest = null;
+        let pdfDest = null;
+
+        // Write GDT file first
+        try {
+          gdtDest = writeGdtFile(filename, item.content);
+          logger.ok(`Written GDT: ${filename} → ${gdtDest}`);
+        } catch (gdtErr) {
+          throw new Error(`GDT write failed: ${gdtErr.message}`);
+        }
+
+        // Write PDF file if present
+        if (pdfFilename && pdfContent) {
+          try {
+            pdfDest = writePdfFile(pdfFilename, pdfContent);
+            logger.ok(`Written PDF: ${pdfFilename} → ${pdfDest}`);
+          } catch (pdfErr) {
+            // PDF failed after GDT succeeded — rollback GDT
+            try {
+              fs.unlinkSync(gdtDest);
+              logger.warn(`Rolled back GDT file: ${gdtDest}`);
+            } catch (cleanupErr) {
+              logger.error(`Failed to rollback GDT: ${cleanupErr.message}`);
+            }
+            throw new Error(`PDF write failed: ${pdfErr.message}`);
+          }
+        } else if (pdfFilename && !pdfContent) {
+          logger.info(`No PDF content for ${pdfFilename} — skipping PDF`);
+        }
+
+        // Mark as delivered only if all required files succeeded
         await markDelivered(item.id);
-        logger.info(`Marked delivered: ${item.id}`);
+        const fileCount = pdfDest ? 'GDT + PDF' : 'GDT only';
+        logger.info(`Marked delivered: ${item.id} (${fileCount})`);
+
       } catch (fileErr) {
         logger.error(
-          `Failed to process file id=${item.id}: ${fileErr.message}`,
+          `Failed to process record id=${item.id}: ${fileErr.message}`,
         );
       }
     }
